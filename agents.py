@@ -1,1 +1,6 @@
-
+class SMEAgent(...)
+class RetailBlock(...)
+class LogisticsOperator(...)
+class NeutralHub(...)
+class PublicBuyer(...)
+class HorecaChannel(...)
