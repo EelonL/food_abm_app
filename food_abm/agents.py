@@ -427,12 +427,11 @@ class SMEAgent(Agent):
         self.last_channel_name = "none"
         self.last_buyer_name = "none"
         self.last_dependency_ratio = 0.0
-        self.last_channel_count = 1
+        self.last_channel_count = 0
         self.current_dependency = 0.0
         self.market_access_success = 0.0
         self.periods_in_distress = 0
 
-        # Tämä tekee survival-logiikasta aidomman.
         self.cash_reserve = float(cash_buffer_periods)
 
         self.channel_history: List[str] = []
@@ -445,7 +444,6 @@ class SMEAgent(Agent):
         self.lambda_dependency = 0.15
         self.mu_coordination = 0.08
 
-        # Kevyt tuotannon yleiskustannus per yksikkö.
         self.overhead_cost_per_unit = 0.08 + 0.04 * self.risk_aversion
 
     def preferred_channel_bonus(self, channel_name: str) -> float:
@@ -607,14 +605,17 @@ class SMEAgent(Agent):
         scored.sort(key=lambda item: item[1], reverse=True)
         return scored[0][0]
 
+    def recent_channel_diversity(self, window: int = 5) -> int:
+        recent = self.channel_history[-window:]
+        recent = [c for c in recent if c != "none"]
+        return len(set(recent))
+
     def _update_cash_reserve(self, profit: float) -> None:
-        # Negatiivinen tulos syö puskuria nopeasti, positiivinen kasvattaa hitaammin.
         if profit < 0:
             self.cash_reserve += profit / 100.0
         else:
             self.cash_reserve += min(0.15, profit / 600.0)
 
-        # Ei rajatonta puskurikasvua.
         self.cash_reserve = min(self.cash_reserve, self.cash_buffer_periods * 1.5)
 
     def execute_trade(self, offer: ChannelOffer) -> None:
@@ -649,10 +650,7 @@ class SMEAgent(Agent):
         logistics_cost = volume * offer.unit_logistics_cost
         overhead_cost = volume * self.overhead_cost_per_unit
 
-        # Korjattu profit-laskenta:
-        # base_unit_margin_eur tulkitaan liiketoiminnan katteeksi ennen logistiikkaa ja koordinointia.
         profit = volume * self.base_unit_margin_eur - logistics_cost - overhead_cost - offer.coordination_cost
-
         emissions = self.estimate_emissions(volume, self.distance_to_market_km, use_hub=offer.requires_hub)
 
         self.last_profit = profit
@@ -664,8 +662,10 @@ class SMEAgent(Agent):
         self.last_buyer_name = offer.buyer_name
         self.last_dependency_ratio = offer.dependency_penalty
         self.current_dependency = offer.dependency_penalty
-        self.last_channel_count = 1
         self.market_access_success = 1.0
+
+        # Ei enää kovakoodattua arvoa 1.
+        # last_channel_count asetetaan step()-metodissa tarjottujen kanavien määräksi.
 
         self.channel_history.append(offer.channel_name)
         self.profit_history.append(profit)
@@ -674,7 +674,6 @@ class SMEAgent(Agent):
             self.periods_in_distress += 1
             self.state = "distressed"
         else:
-            # Toipuminen on asteittaista, ei välitön nollaus.
             self.periods_in_distress = max(0, self.periods_in_distress - 1)
 
             if offer.channel_name == "retail":
@@ -706,13 +705,13 @@ class SMEAgent(Agent):
         self.last_dependency_ratio = 0.0
         self.current_dependency = 0.0
         self.market_access_success = 0.0
+        self.last_channel_count = 0
         self.periods_in_distress += 1
         self.state = "distressed"
         self._update_cash_reserve(self.last_profit)
         self.update_learning(success=False, used_hub=False)
 
     def survival_check(self) -> None:
-        # Poistuminen joko puskurin loppumisen tai pitkän distress-jakson kautta.
         survival_limit = 5
         if self.cash_buffer_periods <= 2:
             survival_limit = 3
@@ -728,6 +727,10 @@ class SMEAgent(Agent):
             return
 
         offers = self.gather_offers()
+
+        # Tämä mittaa, montako käyttökelpoista kanavaa agentilla oli tarjolla tällä stepillä.
+        self.last_channel_count = len(offers)
+
         chosen_offer = self.choose_best_offer(offers)
 
         if chosen_offer is None:
