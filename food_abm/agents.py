@@ -3,20 +3,6 @@ food_abm/agents.py
 
 Agent definitions for a Mesa-based agent-based simulation of regional food
 supply chains in Uusimaa, Finland.
-
-Design goals:
-- Keep the code readable and easy to extend.
-- Represent the key actors discussed in the study:
-  * SME food firms
-  * two dominant retail blocks
-  * logistics operators
-  * neutral hubs
-  * public buyers
-  * HORECA channel
-- Support scenario-based experimentation rather than detailed forecasting.
-
-This file is intended to be copied into a GitHub repository as:
-    food_abm/agents.py
 """
 
 from __future__ import annotations
@@ -28,59 +14,16 @@ import math
 from mesa import Agent
 
 
-# ---------------------------------------------------------------------------
-# Utility helpers
-# ---------------------------------------------------------------------------
-
 def clamp(value: float, low: float = 0.0, high: float = 1.0) -> float:
-    """Clamp a float into [low, high]."""
     return max(low, min(high, value))
 
 
-def safe_mean(values: List[float]) -> float:
-    """Return mean or 0.0 if list is empty."""
-    return sum(values) / len(values) if values else 0.0
-
-
 def logistic(x: float) -> float:
-    """Simple logistic transform."""
     return 1.0 / (1.0 + math.exp(-x))
 
 
-# ---------------------------------------------------------------------------
-# Channel offer object
-# ---------------------------------------------------------------------------
-
 @dataclass
 class ChannelOffer:
-    """
-    Represents one potential commercial channel for an SME in one simulation step.
-
-    Attributes
-    ----------
-    channel_name:
-        Logical name of the channel.
-    buyer_name:
-        Human-readable buyer / channel owner name.
-    acceptance_probability:
-        Probability that the SME is accepted / matched this step.
-    unit_price:
-        Selling price per unit.
-    unit_logistics_cost:
-        Logistics cost per unit for this channel.
-    stability:
-        How stable/predictable the demand is (0..1).
-    dependency_penalty:
-        Penalty for strategic dependency on this channel (0..1 or cost-like).
-    coordination_cost:
-        Extra effort cost for managing this channel.
-    max_volume:
-        Maximum volume this channel can absorb this step.
-    requires_hub:
-        Whether the offer assumes use of a neutral hub.
-    metadata:
-        Optional channel-specific diagnostics.
-    """
     channel_name: str
     buyer_name: str
     acceptance_probability: float
@@ -93,36 +36,21 @@ class ChannelOffer:
     requires_hub: bool = False
     metadata: Optional[Dict[str, Any]] = None
 
-    def expected_profit(self, volume: float, base_unit_margin: float) -> float:
-        """
-        Expected contribution margin from this channel for a given volume.
-
-        The model assumes:
-        - base_unit_margin is the SME's own per-unit margin before channel-specific
-          logistics and coordination effects
-        - unit_price acts as a market attractiveness proxy
-        """
+    def expected_profit(
+        self,
+        volume: float,
+        base_unit_margin: float,
+        overhead_cost_per_unit: float = 0.0,
+    ) -> float:
         effective_volume = min(volume, self.max_volume)
         expected_sales = self.acceptance_probability * effective_volume
-        return expected_sales * (self.unit_price + base_unit_margin - self.unit_logistics_cost) - self.coordination_cost
+        return (
+            expected_sales * (base_unit_margin - self.unit_logistics_cost - overhead_cost_per_unit)
+            - self.coordination_cost
+        )
 
-
-# ---------------------------------------------------------------------------
-# Base channel / buyer agents
-# ---------------------------------------------------------------------------
 
 class RetailBlock(Agent):
-    """
-    Represents one dominant vertically integrated retail ecosystem
-    (for example Kesko or S-ryhmä).
-
-    The retail block acts as a gatekeeper:
-    - minimum delivery sizes
-    - quality/compliance requirements
-    - digital/data requirements
-    - preference for service level and volume fit
-    """
-
     def __init__(
         self,
         model,
@@ -158,10 +86,6 @@ class RetailBlock(Agent):
         self.coordination_cost = coordination_cost
 
     def evaluate_sme(self, sme: "SMEAgent") -> Tuple[float, Dict[str, float]]:
-        """
-        Returns an acceptance probability proxy and component scores.
-        """
-        # Hard gates
         if sme.delivery_batch_size < self.min_delivery_requirement:
             return 0.0, {"hard_fail": 1.0}
         if sme.quality_compliance < self.acceptance_threshold:
@@ -173,7 +97,7 @@ class RetailBlock(Agent):
         service_score = clamp((sme.logistics_competence + sme.quality_compliance) / 2.0)
         compliance_score = clamp(sme.quality_compliance)
         volume_score = clamp(sme.delivery_batch_size / max(self.min_delivery_requirement * 2.0, 1.0))
-        locality_score = 0.7  # Simplified: same broad region in this prototype
+        locality_score = 0.7
 
         score = (
             self.price_weight * price_score
@@ -223,18 +147,10 @@ class RetailBlock(Agent):
         )
 
     def step(self) -> None:
-        # Retail blocks are passive in this prototype.
         return
 
 
 class PublicBuyer(Agent):
-    """
-    Institutional buyer representing public procurement / school meals / welfare areas.
-
-    Key mechanism:
-    - Can be made more SME-friendly via scenario settings.
-    """
-
     def __init__(
         self,
         model,
@@ -296,10 +212,6 @@ class PublicBuyer(Agent):
 
 
 class HorecaChannel(Agent):
-    """
-    Represents restaurants / catering / foodservice as a diversified market channel.
-    """
-
     def __init__(
         self,
         model,
@@ -341,12 +253,6 @@ class HorecaChannel(Agent):
 
 
 class NeutralHub(Agent):
-    """
-    Neutral logistics hub / cross-docking / shared logistics service.
-
-    The hub itself does not buy products. It improves logistics economics when used.
-    """
-
     def __init__(
         self,
         model,
@@ -375,9 +281,6 @@ class NeutralHub(Agent):
         return (self.current_load + volume) <= self.hub_capacity
 
     def expected_logistics_multiplier(self, sme: "SMEAgent") -> float:
-        """
-        Lower is better. A multiplier < 1.0 means cheaper logistics.
-        """
         bundle_bonus = 0.30 * self.matching_efficiency
         collaboration_bonus = 0.15 * sme.collaboration_willingness
         trust_bonus = 0.10 * sme.trust_level
@@ -407,13 +310,6 @@ class NeutralHub(Agent):
 
 
 class LogisticsOperator(Agent):
-    """
-    Shared logistics operator. Can be neutral or tied to stronger market actors.
-
-    Core role:
-    - determines whether small deliveries are economically viable
-    """
-
     def __init__(
         self,
         model,
@@ -476,27 +372,7 @@ class LogisticsOperator(Agent):
         return
 
 
-# ---------------------------------------------------------------------------
-# SME agent
-# ---------------------------------------------------------------------------
-
 class SMEAgent(Agent):
-    """
-    SME food business.
-
-    This is the key decision-making agent in the model.
-    It evaluates available channels every step and chooses the best one based on:
-    - expected profit
-    - market access
-    - stability
-    - strategic fit
-    - dependency penalty
-    - coordination burden
-
-    The current implementation keeps one dominant channel per step to keep the
-    prototype readable. That can later be extended to multi-channel allocation.
-    """
-
     def __init__(
         self,
         model,
@@ -541,7 +417,6 @@ class SMEAgent(Agent):
             else self.random.uniform(20.0, 120.0)
         )
 
-        # Dynamic state
         self.state = "independent"
         self.alive = True
         self.last_profit = 0.0
@@ -557,11 +432,12 @@ class SMEAgent(Agent):
         self.market_access_success = 0.0
         self.periods_in_distress = 0
 
-        # History
+        # Tämä tekee survival-logiikasta aidomman.
+        self.cash_reserve = float(cash_buffer_periods)
+
         self.channel_history: List[str] = []
         self.profit_history: List[float] = []
 
-        # Utility weights (bounded rationality)
         self.alpha_profit = 0.45
         self.beta_access = 0.20
         self.gamma_stability = 0.15
@@ -569,18 +445,13 @@ class SMEAgent(Agent):
         self.lambda_dependency = 0.15
         self.mu_coordination = 0.08
 
-    # ---------------------------------------------------------------------
-    # Internal calculations
-    # ---------------------------------------------------------------------
+        # Kevyt tuotannon yleiskustannus per yksikkö.
+        self.overhead_cost_per_unit = 0.08 + 0.04 * self.risk_aversion
 
     def preferred_channel_bonus(self, channel_name: str) -> float:
         return 0.15 if channel_name in self.preferred_channels else 0.0
 
     def strategic_fit(self, offer: ChannelOffer) -> float:
-        """
-        Channel fit based on SME properties and preferred channels.
-        """
-        freshness_component = 0.0
         if offer.channel_name in {"horeca", "retail"}:
             freshness_component = clamp(1.0 - self.shelf_life_days / 15.0 + 0.3)
         elif offer.channel_name == "public":
@@ -602,7 +473,11 @@ class SMEAgent(Agent):
 
     def expected_channel_utility(self, offer: ChannelOffer) -> float:
         volume = min(self.production_volume, offer.max_volume)
-        expected_profit = offer.expected_profit(volume, self.base_unit_margin_eur)
+        expected_profit = offer.expected_profit(
+            volume=volume,
+            base_unit_margin=self.base_unit_margin_eur,
+            overhead_cost_per_unit=self.overhead_cost_per_unit,
+        )
         strategic_fit = self.strategic_fit(offer)
 
         utility = (
@@ -616,18 +491,12 @@ class SMEAgent(Agent):
         return utility
 
     def estimate_emissions(self, volume: float, distance_km: float, use_hub: bool) -> float:
-        """
-        Very simple emissions proxy for prototype purposes.
-        """
         base_factor = 0.015
         if use_hub:
             base_factor *= 0.82
         return volume * distance_km * base_factor
 
     def update_learning(self, success: bool, used_hub: bool) -> None:
-        """
-        Simple adaptive learning mechanism.
-        """
         delta = self.learning_rate if success else -self.learning_rate * 0.6
 
         if used_hub:
@@ -702,7 +571,6 @@ class SMEAgent(Agent):
         for retail in getattr(self.model, "retail_blocks", []):
             offer = retail.create_offer(self)
             if offer is not None:
-                # update logistics estimate via shared operator, if present
                 if operator and operator.can_serve(self.delivery_batch_size, self.distance_to_market_km):
                     offer.unit_logistics_cost = operator.estimate_unit_cost(
                         self.delivery_batch_size,
@@ -739,6 +607,16 @@ class SMEAgent(Agent):
         scored.sort(key=lambda item: item[1], reverse=True)
         return scored[0][0]
 
+    def _update_cash_reserve(self, profit: float) -> None:
+        # Negatiivinen tulos syö puskuria nopeasti, positiivinen kasvattaa hitaammin.
+        if profit < 0:
+            self.cash_reserve += profit / 100.0
+        else:
+            self.cash_reserve += min(0.15, profit / 600.0)
+
+        # Ei rajatonta puskurikasvua.
+        self.cash_reserve = min(self.cash_reserve, self.cash_buffer_periods * 1.5)
+
     def execute_trade(self, offer: ChannelOffer) -> None:
         operator = getattr(self.model, "logistics_operator", None)
         neutral_hub = getattr(self.model, "neutral_hub", None)
@@ -747,7 +625,7 @@ class SMEAgent(Agent):
         accepted = self.random.random() < offer.acceptance_probability
 
         if not accepted:
-            self.last_profit = -offer.coordination_cost * 0.5
+            self.last_profit = -offer.coordination_cost * 0.8
             self.last_revenue = 0.0
             self.last_volume_sold = 0.0
             self.last_emissions = 0.0
@@ -756,20 +634,24 @@ class SMEAgent(Agent):
             self.last_buyer_name = offer.buyer_name
             self.market_access_success = 0.0
             self.periods_in_distress += 1
+            self._update_cash_reserve(self.last_profit)
             self.update_learning(success=False, used_hub=offer.requires_hub)
+            self.state = "distressed"
             return
 
-        if operator is not None:
-            if operator.can_serve(volume, self.distance_to_market_km):
-                operator.register_delivery(volume)
+        if operator is not None and operator.can_serve(volume, self.distance_to_market_km):
+            operator.register_delivery(volume)
 
         if offer.requires_hub and neutral_hub is not None:
             neutral_hub.allocate(volume)
 
         revenue = volume * offer.unit_price
         logistics_cost = volume * offer.unit_logistics_cost
-        gross_margin = volume * self.base_unit_margin_eur
-        profit = gross_margin + revenue - logistics_cost - offer.coordination_cost
+        overhead_cost = volume * self.overhead_cost_per_unit
+
+        # Korjattu profit-laskenta:
+        # base_unit_margin_eur tulkitaan liiketoiminnan katteeksi ennen logistiikkaa ja koordinointia.
+        profit = volume * self.base_unit_margin_eur - logistics_cost - overhead_cost - offer.coordination_cost
 
         emissions = self.estimate_emissions(volume, self.distance_to_market_km, use_hub=offer.requires_hub)
 
@@ -788,21 +670,23 @@ class SMEAgent(Agent):
         self.channel_history.append(offer.channel_name)
         self.profit_history.append(profit)
 
-        # dynamic state transitions
         if profit < 0:
             self.periods_in_distress += 1
+            self.state = "distressed"
         else:
-            self.periods_in_distress = 0
+            # Toipuminen on asteittaista, ei välitön nollaus.
+            self.periods_in_distress = max(0, self.periods_in_distress - 1)
 
-        if offer.channel_name in {"retail"}:
-            self.state = "duopoly_supplier"
-        elif offer.channel_name in {"public", "horeca"}:
-            self.state = "multichannel"
-        elif offer.channel_name == "hub":
-            self.state = "hub_user"
-        else:
-            self.state = "independent"
+            if offer.channel_name == "retail":
+                self.state = "duopoly_supplier"
+            elif offer.channel_name in {"public", "horeca"}:
+                self.state = "multichannel"
+            elif offer.channel_name == "hub":
+                self.state = "hub_user"
+            else:
+                self.state = "independent"
 
+        self._update_cash_reserve(profit)
         self.update_learning(success=True, used_hub=offer.requires_hub)
 
     def handle_no_trade(self) -> None:
@@ -824,25 +708,20 @@ class SMEAgent(Agent):
         self.market_access_success = 0.0
         self.periods_in_distress += 1
         self.state = "distressed"
+        self._update_cash_reserve(self.last_profit)
         self.update_learning(success=False, used_hub=False)
 
     def survival_check(self) -> None:
-        """
-        Basic survival rule. Firms exit after repeated distress.
-        """
-        survival_limit = 4
+        # Poistuminen joko puskurin loppumisen tai pitkän distress-jakson kautta.
+        survival_limit = 5
         if self.cash_buffer_periods <= 2:
             survival_limit = 3
-        if self.cash_buffer_periods >= 5:
-            survival_limit = 5
+        elif self.cash_buffer_periods <= 4:
+            survival_limit = 4
 
-        if self.periods_in_distress >= survival_limit:
+        if self.cash_reserve <= 0 or self.periods_in_distress >= survival_limit:
             self.alive = False
             self.state = "exit"
-
-    # ---------------------------------------------------------------------
-    # Mesa step
-    # ---------------------------------------------------------------------
 
     def step(self) -> None:
         if not self.alive:
@@ -857,10 +736,6 @@ class SMEAgent(Agent):
             self.execute_trade(chosen_offer)
 
         self.survival_check()
-
-    # ---------------------------------------------------------------------
-    # Reporting helpers for DataCollector
-    # ---------------------------------------------------------------------
 
     @property
     def is_alive(self) -> int:
